@@ -1,0 +1,59 @@
+[1mdiff --git a/azure-pipelines.yml b/azure-pipelines.yml[m
+[1mindex bc9f3d6..f93431e 100644[m
+[1m--- a/azure-pipelines.yml[m
+[1m+++ b/azure-pipelines.yml[m
+[36m@@ -116,36 +116,23 @@[m [mstages:[m
+ [m
+       displayName: Terraform Validate[m
+ [m
+[31m-[m
+[31m-[m
+ # ======================================[m
+ # Stage 4 - Docker Build[m
+ # ======================================[m
+[31m-[m
+ - stage: DockerBuild[m
+[31m-[m
+[31m-  dependsOn: TerraformValidate[m
+[32m+[m[32m  displayName: Build Docker Image[m
+ [m
+   jobs:[m
+[31m-[m
+[31m-  - job: Build[m
+[31m-[m
+[32m+[m[32m  - job: BuildDocker[m
+     steps:[m
+[31m-[m
+     - powershell: |[m
+[31m-[m
+[31m-        docker build `[m
+[31m-          -t $(ECR_REPOSITORY):$(IMAGE_TAG) `[m
+[31m-          .[m
+[31m-[m
+[32m+[m[32m        docker build -t eks-cicd-app:$(IMAGE_TAG) .[m
+       displayName: Build Docker Image[m
+ [m
+ [m
+[31m-[m
+ # ======================================[m
+ # Stage 5 - Push ECR[m
+ # ======================================[m
+[31m-[m
+ - stage: PushECR[m
+   displayName: Push Image To ECR[m
+   dependsOn: DockerBuild[m
+[36m@@ -197,14 +184,11 @@[m [mstages:[m
+             throw "Docker push failed"[m
+         }[m
+ [m
+[31m-        Write-Host "Push completed successfully"[m
+[31m-[m
+       displayName: Push Image To ECR[m
+ [m
+       env:[m
+         AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)[m
+         AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)[m
+[31m-[m
+ # ======================================[m
+ # Stage 6 - Deploy EKS[m
+ # ======================================[m

@@ -1,0 +1,301 @@
+trigger:
+  branches:
+    include:
+      - main
+
+
+pool:
+  name: Windows-Self-Hosted1
+
+
+variables:
+- group: aws-eks-lab
+
+- name: IMAGE_TAG
+  value: $(Build.BuildId)
+
+
+stages:
+
+
+# ======================================
+# Stage 1 - Validate
+# ======================================
+
+- stage: Validate
+
+  displayName: Validate
+
+  jobs:
+
+  - job: ValidateTools
+
+    steps:
+
+    - checkout: self
+
+    - powershell: |
+        Write-Host "Checking tools..."
+
+        aws --version
+        docker --version
+        kubectl version --client
+        terraform --version
+        python --version
+
+      displayName: Verify Tools
+
+
+
+# ======================================
+# Stage 2 - Unit Test
+# ======================================
+
+- stage: Test
+
+  displayName: Unit Tests
+
+  dependsOn: Validate
+
+  jobs:
+
+  - job: UnitTest
+
+    steps:
+
+    - powershell: |
+
+        python -m pip install --upgrade pip
+
+        pip install -r app/requirements.txt
+
+        pip install pytest
+
+        python -m pytest tests -v
+
+      displayName: Run Unit Tests
+
+
+
+# ======================================
+# Stage 3 - Terraform Validate
+# ======================================
+
+- stage: TerraformValidate
+  dependsOn: Test
+
+  jobs:
+  - job: Terraform
+
+    steps:
+
+    - powershell: |
+        cd terraform
+
+        Write-Host "===== MAIN.TF USED BY PIPELINE ====="
+        Get-Content main.tf
+
+        Write-Host "===== TERRAFORM VERSION ====="
+        terraform --version
+
+        Write-Host "===== CLEAN OLD TERRAFORM CACHE ====="
+        if (Test-Path ".terraform") {
+            Remove-Item -Recurse -Force ".terraform"
+        }
+
+        Write-Host "===== TERRAFORM INIT ====="
+        terraform init -backend=false -upgrade
+
+        Write-Host "===== MODULES.JSON ====="
+        if (Test-Path ".terraform/modules/modules.json") {
+            Get-Content ".terraform/modules/modules.json"
+        }
+
+        Write-Host "===== TERRAFORM VALIDATE ====="
+        terraform validate
+
+      displayName: Terraform Validate
+
+# ======================================
+# Stage 4 - Docker Build
+# ======================================
+- stage: DockerBuild
+  displayName: Build Docker Image
+
+  jobs:
+  - job: BuildDocker
+    steps:
+    - powershell: |
+        docker build -t eks-cicd-app:$(IMAGE_TAG) .
+      displayName: Build Docker Image
+
+
+# ======================================
+# Stage 5 - Push ECR
+# ======================================
+- stage: PushECR
+  displayName: Push Image To ECR
+  dependsOn: DockerBuild
+
+  jobs:
+  - job: PushImage
+    displayName: Push Docker Image To ECR
+
+    steps:
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $region = "$(AWS_REGION)"
+        $account = "$(AWS_ACCOUNT_ID)"
+        $repo = "$(ECR_REPOSITORY)"
+        $tag = "$(IMAGE_TAG)"
+
+        $registry = "$account.dkr.ecr.$region.amazonaws.com"
+        $image = "$registry/$repo`:$tag"
+
+        Write-Host "Checking AWS identity..."
+        aws sts get-caller-identity
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "AWS authentication failed"
+        }
+
+        Write-Host "Logging out old ECR session..."
+        docker logout $registry
+
+        Write-Host "Logging in to ECR..."
+        cmd /c "aws ecr get-login-password --region $region | docker login --username AWS --password-stdin $registry"
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "ECR login failed"
+        }
+
+        Write-Host "Tagging image..."
+        docker tag eks-cicd-app:$(IMAGE_TAG) $image
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Docker tag failed"
+        }
+
+        Write-Host "Pushing image..."
+        docker push $image
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Docker push failed"
+        }
+
+      displayName: Push Image To ECR
+
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+# ======================================
+# Stage 6 - Deploy EKS
+# ======================================
+
+- stage: DeployEKS
+
+  displayName: Deploy To EKS
+
+  dependsOn: PushECR
+
+  jobs:
+
+  - job: Deploy
+
+    steps:
+
+    - powershell: |
+
+        aws eks update-kubeconfig `
+          --region $(AWS_REGION) `
+          --name $(EKS_CLUSTER)
+
+
+        $registry = "$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com"
+
+        $image = "$registry/$(ECR_REPOSITORY):$(IMAGE_TAG)"
+
+
+        Write-Host "Deploying image:"
+        Write-Host $image
+
+
+        (Get-Content kubernetes/deployment.yaml) `
+          -replace "IMAGE_PLACEHOLDER", $image |
+        Set-Content kubernetes/deployment-generated.yaml
+
+
+        kubectl apply `
+          -f kubernetes/deployment-generated.yaml
+
+
+        kubectl apply `
+          -f kubernetes/service.yaml
+
+
+        kubectl rollout status `
+          deployment/eks-cicd-app `
+          --timeout=180s
+
+      displayName: Deploy Application
+
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+
+
+# ======================================
+# Stage 7 - Verify
+# ======================================
+
+- stage: Verify
+
+  displayName: Deployment Verification
+
+  dependsOn: DeployEKS
+
+  jobs:
+
+  - job: VerifyDeployment
+
+    steps:
+
+    - powershell: |
+
+        aws eks update-kubeconfig `
+          --region $(AWS_REGION) `
+          --name $(EKS_CLUSTER)
+
+
+        Write-Host "===== NODES ====="
+
+        kubectl get nodes
+
+
+        Write-Host "===== PODS ====="
+
+        kubectl get pods -o wide
+
+
+        Write-Host "===== DEPLOYMENT ====="
+
+        kubectl get deployment
+
+
+        Write-Host "===== SERVICE ====="
+
+        kubectl get service
+
+
+        Write-Host "===== IMAGE ====="
+
+        kubectl get deployment eks-cicd-app `
+          -o jsonpath="{.spec.template.spec.containers[0].image}"
+
+      displayName: Verify Deployment
+
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
